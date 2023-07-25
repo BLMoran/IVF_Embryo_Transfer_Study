@@ -1,0 +1,845 @@
+---
+title: "Live Births Following Successful Implantation of Cleavage Stage vs Blastocyst Stage Embryos" 
+author: "Dr Benjamin Moran"
+date: today
+format:   
+  html:
+    embed-resources: true
+    grid: 
+      body-width: 4500px
+      sidebar-width: 300px
+toc: true
+toc-location: left
+toc-depth: 4
+number-sections: true
+editor: visual
+---
+
+## Introduction
+
+This is an explanation of the statistical analysis of the retrospective, observational study examining whether there is a difference in clevage stage or blastocyst stage implantation on the number of live births after successful implantation.
+
+## Methods
+
+This manuscript has been prepared in accordance with the Strengthening the Reporting of Observational Studies in Epidemiology (STROBE) Statement.
+
+### Objectives
+
+To determine whether blastocyst-stage (day 5) embryo transfer improves the live birth rate, compared with cleavage-stage (day 2) embryo transfer in patients with successful implantation. Secondary objectives include determining the effects of differing embryo transfer stages on pregnancy rate, miscarriage rate, probability of multiple pregnancies, ectopic pregnancy rate, and neonatal birth weight.
+
+### Outcomes
+
+The primary outcome of the study is the number of live births. The secondary outcomes of this study are pregnancy rate, miscarriage rate, probability of multiple pregnancies, ectopic pregnancy rate, and neonatal birth weight.
+
+### Intervention/Exposure
+
+The intervention is the embryo transfer at blastocyst-stage (day 5) or cleavage-stage (day 2).
+
+### Statistical Analysis
+
+Descriptive statistics were used for demographic and clinical data. Normally distributed variables were reported as means (standard deviations) and non-normally distributed variables as medians (interquartile ranges). Proportions were reported as percentages.
+
+For the primary outcome of number of live births, a poisson generalised linear model with a log-link was used. A directed acyclic graph (DAG) was used to generate a minimum adjustment set of covariates for the causal pathway from embryo stage to number of live births. From this minimum adjustment set, inverse-probability of treatment weights were generated and included in the poisson model. The average treatment effect (ATE) was then estimated using G-computation (doubly robust with IPTW and G-computation). Standard errors and confidence intervals were estimated using bootstrap, with 4999 bootstrap replications and the entire process of weighting and effect estimation included in each replication.
+
+Subgroup analysis was performed using moderation analysis, where balance is achieved in each subgroup of the moderating variable, as described in Green and Stuart (2014). A priori subgroups chosen were maternal age, paternal age, maternal BMI, the use of fresh vs frozen embryos and the fertilisaion method.
+
+A sensitivity analysis was performed examining the influence of missingness violations. Multiple imputation was used to assess this influence.
+
+Statistical analysis was performed using R Version 4.3.0 and RStudio Version 2023.6.0.421 (Posit team (2023). RStudio: Integrated Development Environment for R. Posit Software, PBC, Boston, MA. http://www.posit.co/) statistical software. Packages used for analysis included tidyverse, ggplot2, gtsummary, gt, WeightIt, cobalt, marginaleffects, boot, mice and MatchThem. p-values \<0.05 were considered significant.
+
+### Covariate Selection for Inverse Probability Weighting
+Below is the directed acyclic graph (DAG), which allows for visualisation of the relationship of the variables. This enables us to determine which variables are confounders (red- these affect the exposure/treatment and the outcome), colliders (there are no colliders in this DAG), and mediators (blue- these are intermediate on the causal pathway). Overall, we are interested in the least biased causal pathway from Embryo Age (green) to Live Births (Blue).
+
+```{r, echo=FALSE}
+knitr::include_graphics("IVF DAG.png")
+```
+
+From this DAG, a minimum adjustment set is produced, which leads to a less biased estimate. This minimum adjustment set consists of teh above variables in red (confounders) with the exception of previous failed cycles, as this data was unavailable. We use this set of variables (covariates) to generate the inverse probability of treatment weights (IPTW). We then use these weights in a regression model to give a less biased estimate.
+
+## Results
+There were 5,335 patients that were eligible for analysis. 
+
+### Patient Demographics
+Patient demographics are given in table 1.
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = F, message = F, warning = F, error = T, 
+                      out.width = "90%", dev = "png", dpi = 300, cache = T)
+
+# Global Options
+# these options help Stan run faster
+options(mc.cores = parallel::detectCores())
+
+library(tidyverse)
+library(gtsummary)
+library(gt)
+library(WeightIt)
+library(cobalt)
+library(marginaleffects)
+library(performance)
+library(boot)
+library(mice)
+library(MatchThem)
+
+ivf <- readxl::read_excel("IVF Data 2_5_23.xlsx") 
+
+# Remove columns with ignore in title
+ivf <- ivf |> 
+  dplyr::select(-contains(c("Ignore", "IGNRE", "IGONRE")))|> 
+  janitor::clean_names()
+
+# Convert NA in Live Birth Column to 0
+ivf <- ivf |> 
+  mutate(live_babies_num = replace_na(live_babies_num, 0))
+
+# Convert Maternal BMI = 0 to NA
+ivf <- ivf |> 
+  mutate(mat_bmi = ifelse(mat_bmi <15, NA, mat_bmi))
+
+# Generate Table 1
+# Create Parity Variable
+ivf <- ivf |> 
+  mutate(parity = case_when(
+    total_previous_births == 0 ~ "Nulliparous",
+    (total_previous_births > 0) & (total_previous_births <= 4) ~ "Multiparous",
+    total_previous_births > 4 ~ "Grand Multipara"
+  )) |> 
+  mutate(parity = factor(parity,
+                          levels = c("Nulliparous", "Multiparous", "Grand Multipara")))
+
+# Create Gravida Variable
+ivf <- ivf |> 
+  mutate(gravida = case_when(
+    total_previous_pregnancies == 0 ~ "Nulligravida",
+    total_previous_pregnancies == 1 ~ "Primigravida",
+    total_previous_pregnancies > 1 ~ "Multigravida"
+  )) |> 
+  mutate(gravida = factor(gravida,
+                          levels = c("Nulligravida", "Primigravida", "Multigravida")))
+
+# Rename Type of IVF Factors
+ivf <- ivf |> 
+  mutate(fresh_frozen = case_when(
+    fresh_frozen == "thaw" ~ "Frozen",
+    fresh_frozen == "STIM" ~ "Fresh"
+  ))
+
+# Rename Embryo Stage
+ivf <- ivf |> 
+  mutate(embryo_age = case_when(
+    embryo_age == 2 ~ "Cleavage Stage",
+    embryo_age == 5 ~ "Blastocyst"
+  ))
+
+# Remove Rows with No Exposure Data (ie Embryo Age)
+ivf <- ivf |> 
+  filter(!is.na(embryo_age))
+
+table1 <- ivf |> 
+  gtsummary::select(mat_age, mat_bmi, male_age, gravida, parity, previous_miscarriages, eggs_coll, fresh_frozen, endo_thickness, fert_method, embryo_age) |> 
+  tbl_summary(by = "embryo_age", missing = "no",
+              label = list(
+                mat_age = "Maternal Age in Years (Median (IQR))",
+                mat_bmi = "Maternal BMI (kg/m^2)",
+                male_age = "Paternal Age in Years (Median (IQR))",
+                gravida = "Gravida (n (%))",
+                parity = "Parity (n (%))",
+                previous_miscarriages = "Previous Miscarriages (n (%))",
+                eggs_coll = "Number of Eggs Collected (Median (IQR))",
+                fresh_frozen = "Type of IVF",
+                endo_thickness = "Endometrial Thickness in mm (Median (IQR))",
+                fert_method = "Fertilisation Method"),
+              type = list(endo_thickness ~ "continuous"),
+              statistic = list(all_continuous() ~ "{median} ({p25}-{p75})",
+                               all_categorical() ~ "{n} ({p}%)")) |> 
+  add_p() |> 
+  bold_labels() |> 
+  italicize_levels() |> 
+  modify_spanning_header(starts_with("stat_") ~ "**Intervention**") |> 
+  add_overall()
+```
+
+```{r}
+#| tbl-cap: "Table 1: Patient Demographics by Intervention"
+table1
+```
+### Unadjusted Outcomes
+The following is a table of unadjusted outcomes (ie a univariate analysis)
+```{r}
+#| tbl-cap: "Table 2: Unadjusted Outcomes by Intervention"
+
+# Generate Table of Outcomes
+# Separate Multiple Birth Weights into separate columns
+ivf <- ivf |> 
+  separate(neonate_birth_wt, c("neonate1_wt", "neonate2_wt"), " ") |> 
+  mutate_at(c("neonate1_wt", "neonate2_wt"), as.numeric)
+
+# Create Miscarriage Column
+ivf <- ivf |> 
+  mutate(resultant_miscarriage = case_when(
+    resultant_preg == 0 ~ "Yes",
+    resultant_preg == 1 ~ "No"
+  ))
+
+# Rename Resultant Pregnancy
+ivf <- ivf |> 
+  mutate(resultant_preg = case_when(
+    resultant_preg == 0 ~ "No",
+    resultant_preg == 1 ~ "Yes"
+  ))
+
+table_outcomes <- ivf |> 
+  gtsummary::select(live_babies_num, resultant_preg, resultant_miscarriage, stillbirth_num, neonatal_death, neonate1_wt, neonate2_wt, embryo_age) |> 
+  tbl_summary(by = "embryo_age", missing = "no",
+              label = list(
+                live_babies_num = "Number of Live Babies (n (%))",
+                resultant_preg = "Resultant Pregnancy (n (%))",
+                resultant_miscarriage = "Miscarriage (n (%))",
+                stillbirth_num = "Stillbirths (n (%))",
+                neonatal_death = "Neonatal Deaths (n (%))",
+                neonate1_wt = "Weight of Neonate 1 in kg (Median (IQR)",
+                neonate2_wt = "Weight of Neonate 2 in kg (Median (IQR)"),
+              type = list(c(neonate1_wt, neonate2_wt) ~ "continuous"),
+              value = list(resultant_preg ~ "Yes",
+                           resultant_miscarriage ~ "Yes"),
+              statistic = list(all_continuous() ~ "{median} ({p25}-{p75})",
+                               all_categorical() ~ "{n} ({p}%)")) |> 
+  bold_labels() |> 
+  italicize_levels() |> 
+  modify_header(label = "**Outcome**") |> 
+  modify_spanning_header(starts_with("stat_") ~ "**Intervention**") |> 
+  add_overall()
+
+table_outcomes
+```
+
+
+### Primary Outcome
+From the output below, we can see that the use of blastocyst stage embryo age is no different to the use of cleavage stage embryo age in the rate of live birth numbers.
+``` {r, include=FALSE}
+# Generate IPTW
+# Rename Embryo Stage to binary (Cleavage= 0, Blastocyst = 1) and factor
+ivf <- ivf |> 
+  mutate(embryo_age = case_when(
+    embryo_age == "Cleavage Stage"  ~ 0,
+    embryo_age == "Blastocyst" ~ 1 
+  )) |> mutate(embryo_age = as_factor(as.character(embryo_age)))
+
+
+# Weightit Package
+weights <- weightit(embryo_age ~ eggs_coll + fert_method + mat_age + male_age + fresh_frozen + endo_thickness + sperm_count,
+                    data = ivf,
+                    estimand = "ATE",
+                    method = "ps"
+)
+
+# Add weights to ivf dataframe
+ivf_weightit <- ivf |> 
+  mutate(ipw = weights$weights)
+
+# Determine Primary Outcome
+model_embryoage_weightit <- 
+  glm(live_babies_num ~ embryo_age,
+      family = poisson(link = "log"),
+      data = ivf_weightit,
+      weights = ipw)
+
+model_neg.bn <-   MASS::glm.nb(live_babies_num ~ embryo_age,
+      link = "log",
+      data = ivf_weightit,
+      weights = ipw)
+
+summary(model_embryoage_weightit)
+
+# Check Balance of Weights
+bal.tab(weights)
+bal.plot(weights, var.name = "eggs_coll", which = "both")
+bal.plot(weights, var.name = "fert_method", which = "both")
+bal.plot(weights, var.name = "mat_age", which = "both")
+bal.plot(weights, var.name = "fresh_frozen", which = "both")
+bal.plot(weights, var.name = "endo_thickness", which = "both")
+bal.plot(weights, var.name = "sperm_count", which = "both")
+bal.plot(weights, var.name = "male_age", which = "both")
+
+# Model Diagostics
+check_model(model_embryoage_weightit)
+check_overdispersion(model_embryoage_weightit)
+check_zeroinflation(model_embryoage_weightit)
+model_performance(model_embryoage_weightit)
+
+# Estimate Treatment Effects and Standard Errors after Weighting
+# G-computation using marginaleffects package and avg_comparisons (Robust SEs/delta method)
+primary <- avg_comparisons(model_embryoage_weightit,
+                variables = "embryo_age",
+                vcov = "HC3",
+                wts = "ipw",
+                transform = "exp")|> 
+  dplyr::select(estimate, conf.low, conf.high, p.value)
+
+# Confidence Intervals using Bootstrap
+# Create estimation function
+boot_fun <- function(data, i) {
+  boot_data <- data[i,]
+  
+  #PS weighting for the ATE
+  W <- weightit(embryo_age ~ eggs_coll + fert_method + mat_age + male_age + fresh_frozen + endo_thickness + sperm_count,
+                    data = boot_data,
+                    estimand = "ATE",
+                    method = "ps")
+  
+  #Bring weights into the dataset
+  boot_data <- boot_data |> mutate(weights = W$weights)
+  
+  #Fit outcome model
+  fit <-glm(live_babies_num ~ embryo_age,
+            family = poisson(link = "log"),
+             data = boot_data, weights = weights)
+  
+  #G-computation
+  comp <- avg_comparisons(fit,
+                          variables = "embryo_age",
+                          vcov = FALSE,
+                          newdata = subset(boot_data, embryo_age == 1),
+                          wts = "weights",
+                          transform = "exp",
+                          comparison = "lnratioavg")
+  
+  comp$estimate
+}
+
+# Bootstrap Confidence Intervals
+set.seed(12345)
+boot_out <- boot::boot(ivf_weightit, boot_fun, R = 1999, parallel = "multicore")
+bootstrap_primary <- boot.ci(boot_out, conf = 0.95, type = "perc")
+
+# Generate Primary Outcome Table
+outcome_primary <- tibble(
+  "Outcome" = "Number Live Births",
+  "Estimate (ATE)" = primary$estimate,
+  low.confint = bootstrap_primary$percent[4],
+  high.confint = bootstrap_primary$percent[5],
+  "p-value" = primary$p.value
+) |> mutate_if(is.numeric, round, 3) |>
+  mutate("95% Confidence Interval" = paste(low.confint, high.confint, sep="-")) |> 
+    select(Outcome, `Estimate (ATE)`, `95% Confidence Interval`, `p-value`) |> gt()
+
+
+```
+
+```{r}
+#| tbl-cap: "Primary Outcome: Average Treatment Effect of Blastocyst Vs Cleavage Stage Implantation"
+outcome_primary
+```
+
+### Secondary Outcomes
+As can be seen below, there was no difference in any of the secondary outcomes when comparing blastocyst stage embryos and cleavage stage embryos.
+```{r, include=FALSE}
+# Secondary Outcomes
+# Change Outcome to Binary
+ivf_weightit <- ivf_weightit |> 
+  mutate(resultant_miscarriage = case_when(
+    resultant_miscarriage == "Yes" ~ 1,
+    resultant_miscarriage == "No" ~ 0
+  ))
+
+# Rename Resultant Pregnancy
+ivf_weightit <- ivf_weightit |> 
+  mutate(resultant_preg = case_when(
+    resultant_preg == "No" ~ 0,
+    resultant_preg == "Yes" ~ 1
+  ))
+
+# Pregnancy Rate
+sec_outcome_preg <- 
+  glm(resultant_preg ~ embryo_age,
+      family = binomial(link = "logit"),
+      data = ivf_weightit,
+      weights = ipw) |> 
+  avg_comparisons(variables = "embryo_age",
+                vcov = "HC3",
+                wts = "ipw",
+                transform = "exp")|> 
+  dplyr::select(estimate, conf.low, conf.high, p.value)
+
+# Bootstrap Confidence Intervals
+# Create Bootstrap Function for Binary Outcomes
+boot_fun_preg <- function(data, i) {
+  boot_data <- data[i,]
+  
+  #PS weighting for the ATE
+  W <- weightit(embryo_age ~ eggs_coll + fert_method + mat_age + male_age + fresh_frozen,
+                    data = boot_data,
+                    estimand = "ATE",
+                    method = "ps")
+  
+  #Bring weights into the dataset
+  boot_data <- boot_data |> mutate(weights = W$weights)
+  
+  #Fit outcome model
+  fit <-glm(resultant_preg ~ embryo_age,
+            family = quasibinomial(link = "logit"),
+             data = boot_data, weights = weights)
+  
+  #G-computation
+  comp <- avg_comparisons(fit,
+                          variables = "embryo_age",
+                          vcov = FALSE,
+                          newdata = subset(boot_data, embryo_age == 1),
+                          wts = "weights",
+                          transform = "exp",
+                          comparison = "lnratioavg")
+  
+  comp$estimate
+}
+set.seed(12345)
+boot_out_preg <- boot::boot(ivf_weightit, boot_fun_preg, R = 1999)
+bootstrap_sec_preg <- boot.ci(boot_out_preg, conf = 0.95, type = "perc")
+
+# Extract Data
+outcome_preg <- tibble(
+  outcome = "Resultant Pregnancy",
+  estimate = sec_outcome_preg$estimate,
+  conf.low = bootstrap_sec_preg$percent[4],
+  conf.high = bootstrap_sec_preg$percent[5],
+  p.value = sec_outcome_preg$p.value
+)
+
+# Miscarriage Rate
+sec_outcome_misscarriage <- 
+  glm(resultant_miscarriage ~ embryo_age,
+      family = binomial(link = "log"),
+      data = ivf_weightit,
+      weights = ipw) |> 
+  avg_comparisons(variables = "embryo_age",
+                vcov = "HC3",
+                wts = "ipw",
+                transform = "exp")|> 
+  dplyr::select(estimate, conf.low, conf.high, p.value)
+
+boot_fun_misscarriage <- function(data, i) {
+  boot_data <- data[i,]
+  
+  #PS weighting for the ATE
+  W <- weightit(embryo_age ~ eggs_coll + fert_method + mat_age + male_age + fresh_frozen,
+                    data = boot_data,
+                    estimand = "ATE",
+                    method = "ps")
+  
+  #Bring weights into the dataset
+  boot_data <- boot_data |> mutate(weights = W$weights)
+  
+  #Fit outcome model
+  fit <-glm(resultant_miscarriage ~ embryo_age,
+            family = quasibinomial(link = "logit"),
+             data = boot_data, weights = weights)
+  
+  #G-computation
+  comp <- avg_comparisons(fit,
+                          variables = "embryo_age",
+                          vcov = FALSE,
+                          newdata = subset(boot_data, embryo_age == 1),
+                          wts = "weights",
+                          transform = "exp",
+                          comparison = "lnratioavg")
+  
+  comp$estimate
+}
+
+# Bootstrap Confidence Intervals
+set.seed(12345)
+boot_out_miscarriage <- boot::boot(ivf_weightit, boot_fun_misscarriage, R = 1999, parallel = "multicore")
+bootstrap_sec_miscarriage <- boot.ci(boot_out_miscarriage, conf = 0.95, type = "perc")
+
+# Extract Data
+outcome_miscarriage <- tibble(
+  outcome = "Miscarriage",
+  estimate = sec_outcome_misscarriage$estimate,
+  conf.low = bootstrap_sec_miscarriage$percent[4],
+  conf.high = bootstrap_sec_miscarriage$percent[5],
+  p.value = sec_outcome_misscarriage$p.value
+)
+
+# Multiple Pregnancies
+# Create Multiple Pregnancy Variable
+ivf_weightit <- ivf_weightit |> 
+  mutate(multiple = case_when(
+    (resultant_miscarriage == 1) ~ NA,
+    (live_babies_num == 0) ~ 0,
+    (live_babies_num == 1) ~ 0,
+    (live_babies_num == 2) ~ 1
+  ))
+
+sec_outcome_multiple <- 
+  glm(multiple ~ embryo_age,
+      family = binomial(link = "logit"),
+      data = ivf_weightit,
+      weights = ipw) |> 
+  avg_comparisons(variables = "embryo_age",
+                vcov = "HC3",
+                wts = "ipw",
+                transform = "exp")|> 
+  dplyr::select(estimate, conf.low, conf.high, p.value)
+
+boot_fun_multiple <- function(data, i) {
+  boot_data <- data[i,]
+  
+  #PS weighting for the ATE
+  W <- weightit(embryo_age ~ eggs_coll + fert_method + mat_age + male_age + fresh_frozen,
+                    data = boot_data,
+                    estimand = "ATE",
+                    method = "ps")
+  
+  #Bring weights into the dataset
+  boot_data <- boot_data |> mutate(weights = W$weights)
+  
+  #Fit outcome model
+  fit <-glm(multiple ~ embryo_age,
+            family = quasibinomial(link = "logit"),
+             data = boot_data, weights = weights)
+  
+  #G-computation
+  comp <- avg_comparisons(fit,
+                          variables = "embryo_age",
+                          vcov = FALSE,
+                          newdata = subset(boot_data, embryo_age == 1),
+                          wts = "weights",
+                          transform = "exp",
+                          comparison = "lnratioavg")
+  
+  comp$estimate
+}
+
+# Bootstrap Confidence Intervals
+set.seed(12345)
+boot_out_multiple <- boot::boot(ivf_weightit, boot_fun_multiple, R = 1999, parallel = "multicore")
+bootstrap_sec_multiple <- boot.ci(boot_out_multiple, conf = 0.95, type = "perc")
+
+# Extract Data
+outcome_multiple <- tibble(
+  outcome = "Multiple Pregnancies",
+  estimate = sec_outcome_multiple$estimate,
+  conf.low = bootstrap_sec_multiple$percent[4],
+  conf.high = bootstrap_sec_multiple$percent[5],
+  p.value = sec_outcome_multiple$p.value
+)
+
+# Ectopic Rate (??)
+# Create Ectopic Variable
+ivf_weightit <- ivf_weightit |> 
+  mutate(ectopic = case_when(
+    grepl("Ectopic", sac_position) ~ 1
+  ))
+
+
+# Neonatal Birth Weight
+sec_outcome_birthwt <- 
+  lm(neonate1_wt ~ embryo_age,
+      data = ivf_weightit,
+      weights = ipw) |> 
+  avg_comparisons(variables = "embryo_age",
+                vcov = "HC3",
+                wts = "ipw")|> 
+  dplyr::select(estimate, conf.low, conf.high, p.value)
+
+boot_fun_birthwt <- function(data, i) {
+  boot_data <- data[i,]
+  
+  #PS weighting for the ATE
+  W <- weightit(embryo_age ~ eggs_coll + fert_method + mat_age + male_age + fresh_frozen,
+                    data = boot_data,
+                    estimand = "ATE",
+                    method = "ps")
+  
+  #Bring weights into the dataset
+  boot_data <- boot_data |> mutate(weights = W$weights)
+  
+  #Fit outcome model
+  fit <- lm(neonate1_wt ~ embryo_age,
+             data = boot_data, weights = weights)
+  
+  #G-computation
+  comp <- avg_comparisons(fit,
+                          variables = "embryo_age",
+                          vcov = FALSE,
+                          newdata = subset(boot_data, embryo_age == 1),
+                          wts = "weights")
+  
+  comp$estimate
+}
+
+# Bootstrap Confidence Intervals
+set.seed(12345)
+boot_out_birthwt <- boot::boot(ivf_weightit, boot_fun_birthwt, R = 1999, parallel = "multicore")
+bootstrap_sec_birthwt <- boot.ci(boot_out_birthwt, conf = 0.95, type = "perc")
+
+# Extract Data
+outcome_birthwt <- tibble(
+  outcome = "Neonatal Birthweight",
+  estimate = sec_outcome_birthwt$estimate,
+  conf.low = bootstrap_sec_birthwt$percent[4],
+  conf.high = bootstrap_sec_birthwt$percent[5],
+  p.value = sec_outcome_birthwt$p.value
+)
+
+# Create Outcome Table
+sec_outcome <- rbind(outcome_preg, outcome_miscarriage, outcome_multiple, outcome_birthwt)|> 
+  mutate_if(is.numeric, round, 3) 
+
+```
+
+```{r}
+#| tbl-cap: "Secondary Outcomes: Average Treatment Effects of Blastocyst Vs Cleavage Stage Implantation"
+
+# Generate Secondary Outcome Table
+sec_outcome <- sec_outcome |>
+  dplyr::mutate(
+    "Outcome" = outcome,
+    "Estimate (ATE)" = estimate,
+    "95% Confidence Interval" = paste(conf.low, conf.high, sep="-"),
+    "p-value" = p.value) |> 
+    dplyr::select(Outcome, `Estimate (ATE)`, `95% Confidence Interval`, `p-value`) |> gt()
+
+sec_outcome
+```
+### Subgroup Analysis
+The subgroup (moderator) analysis goes through the same process as the primary analysis, however, without the subgroup variable in the weighting procedure. For example, the subgroup of maternal age does not use maternal age as a balancing covariate (as this will balance any effects within that subgroup across levels of intervention). For continuous variable subgroups, the slopes of the regression model are compared, with a resultant p-value (ie whether there is a difference in the slopes of the 2 treatment groups). For categorical variable subgroups, a stacked bar plot represents the proportion of each category that underwent cleavage or blastocyst stage transfer. 
+
+As can be seen from the graphs below, there is no difference between the use of blastocyst stage or cleavage stage embryo transfer on number of live births in either maternal age, paternal age, maternal BMI, the use of fresh vs frozen embryos or the fertilisation method used.
+
+::: panel-tabset
+
+## Maternal Age
+
+```{r}
+# Subgroup Analyses
+# Using reweighting within each subgroup (as the subgroups were included in the original weighting)
+weights_mat_age <- weightit(embryo_age ~ eggs_coll + fert_method + male_age + fresh_frozen + endo_thickness + sperm_count,
+                    data = ivf,
+                    estimand = "ATE",
+                    method = "ps")
+
+ivf_mat_subgroup <- ivf |> 
+   mutate(ipw_mat_age = weights_mat_age$weights) 
+  
+# Determine Outcome
+model_subgroup_matage <- 
+  glm(live_babies_num ~ embryo_age*mat_age,
+      family = poisson(link = "log"),
+      data = ivf_mat_subgroup,
+      weights = ipw_mat_age)|>summary()
+
+# Graph Moderator Effect Maternal Age
+mat_age_mod_plot <- ivf_mat_subgroup |> 
+  ggplot(aes(x = mat_age, y = live_babies_num, color = embryo_age))+
+  geom_point()+
+  geom_smooth(method = "lm", se = FALSE)+
+  scale_color_manual(name = "Embryo Transfer Age", values = c("#FF6666", "#6666FF"), labels = c("Cleavage Stage", "Blastocyst"))+
+  labs(x = "Maternal Age (Yrs)", y = "Number of Live Births", title = "Moderation of Live Births by Maternal Age", color = "Embryo Transfer Age")+
+  theme_bw()+
+  scale_y_continuous(breaks = seq(0,2, by = 1))+
+  scale_x_continuous(breaks = seq(20, 50, by = 5))+
+  annotate("text", x = 45, y = 0.5, label = "p=0.156", fontface = "plain")
+
+mat_age_mod_plot
+
+```
+
+## Paternal Age
+```{r}
+# Paternal Age
+weights_pat_age <- weightit(embryo_age ~ eggs_coll + fert_method + mat_age + fresh_frozen + endo_thickness + sperm_count,
+                    data = ivf,
+                    estimand = "ATE",
+                    method = "ps")
+
+ivf_pat_subgroup <- ivf |> 
+   mutate(ipw_pat_age = weights_pat_age$weights) 
+
+model_subgroup_patage <- 
+  glm(live_babies_num ~ embryo_age*male_age,
+      family = poisson(link = "log"),
+      data = ivf_pat_subgroup,
+      weights = ipw_pat_age) |> summary()
+
+# Graph Moderator Effect Paternal Age
+pat_age_mod_plot <- ivf_pat_subgroup |> 
+  ggplot(aes(x = male_age, y = live_babies_num, color = embryo_age))+
+  geom_point()+
+  geom_smooth(method = "lm", se = FALSE)+
+  scale_color_manual(name = "Embryo Transfer Age", values = c("#FF6666", "#6666FF"), labels = c("Cleavage Stage", "Blastocyst"))+
+  labs(x = "Paternal Age (Yrs)", y = "Number of Live Births", title = "Moderation of Live Births by Paternal Age", color = "Embryo Transfer Age")+
+  theme_bw()+
+  scale_y_continuous(breaks = seq(0,2, by = 1))+
+  scale_x_continuous(breaks = seq(20, 70, by = 10))+
+  annotate("text", x = 65, y = 0.4, label = "p=0.478", fontface = "plain")
+
+pat_age_mod_plot
+```
+
+## Maternal BMI
+```{r}
+# Maternal BMI
+weights_mat_bmi <- weightit(embryo_age ~ eggs_coll + fert_method + mat_age + male_age + fresh_frozen + endo_thickness + sperm_count,
+                    data = ivf,
+                    estimand = "ATE",
+                    method = "ps")
+
+ivf_matbmi_subgroup <- ivf |> 
+   mutate(ipw_mat_bmi = weights_mat_bmi$weights) 
+
+model_subgroup_matbmi <- 
+  glm(live_babies_num ~ embryo_age*mat_bmi,
+      family = poisson(link = "log"),
+      data = ivf_matbmi_subgroup,
+      weights = ipw_mat_bmi) |> summary()
+
+# Graph Moderator Effect Maternal BMI
+mat_bmi_mod_plot <- ivf_matbmi_subgroup |> 
+  ggplot(aes(x = mat_bmi, y = live_babies_num, color = embryo_age))+
+  geom_point()+
+  geom_smooth(method = "lm", se = FALSE)+
+  scale_color_manual(name = "Embryo Transfer Age", values = c("#FF6666", "#6666FF"), labels = c("Cleavage Stage", "Blastocyst"))+
+  labs(x = "Maternal BMI (kg/m^2)", y = "Number of Live Births", title = "Moderation of Live Births by Maternal BMI", color = "Embryo Transfer Age")+
+  theme_bw()+
+  scale_y_continuous(breaks = seq(0,2, by = 1))+
+  scale_x_continuous(breaks = seq(20, 50, by = 5))+
+  annotate("text", x = 47.5, y = 0.5, label = "p=0.921", fontface = "plain")
+
+mat_bmi_mod_plot
+```
+
+## Fresh Vs Frozen Embryos
+```{r}
+# Fresh vs Frozen Embryo
+weights_fresh_frozen <- weightit(embryo_age ~ eggs_coll + fert_method + mat_age + male_age + endo_thickness + sperm_count,
+                    data = ivf,
+                    estimand = "ATE",
+                    method = "ps")
+
+ivf_freshfrozen_subgroup <- ivf |> 
+   mutate(ipw_freshfrozen = weights_fresh_frozen$weights) 
+
+model_subgroup_freshfrozen <- 
+  glm(live_babies_num ~ embryo_age*fresh_frozen,
+      family = poisson(link = "log"),
+      data = ivf_freshfrozen_subgroup,
+      weights = ipw_freshfrozen) |>
+  avg_comparisons(variables = "embryo_age",
+                vcov = "HC3",
+                wts = "ipw_freshfrozen",
+                transform = "exp",
+                by = "fresh_frozen",
+                hypothesis = "pairwise") |> 
+  mutate_if(is.numeric, round, 3) |> 
+  mutate(
+    Subgroup = term,
+    "Estimate (ATE)" = estimate,
+    "95% Confidence Interval" = paste(conf.low, conf.high, sep="-"),
+    "p-value" = p.value) |> 
+    dplyr::select(Subgroup, `Estimate (ATE)`, `95% Confidence Interval`, `p-value`) |> gt()
+
+freshfrozen_mod_plot <- ivf_freshfrozen_subgroup |> 
+  ggplot(aes(x = fresh_frozen, y = live_babies_num, fill = embryo_age))+
+  geom_col(position = "fill")+
+  scale_fill_manual(name = "Embryo Transfer Age", values = c("#FF6666", "#6666FF"), labels = c("Cleavage Stage", "Blastocyst"))+
+  labs(x = "Fresh or Frozen Embryos", y = "Proportion of Live Births", title = "Moderation of Live Births by Fresh or Frozen Embryos", color = "Embryo Transfer Age")+
+  scale_y_continuous(labels = scales::percent)+
+  theme_bw()+
+  coord_cartesian(ylim=c(0, 1.10))+
+  annotate("text", x = 1.5, y = 1.05, label = "p=0.99", fontface = "plain")
+
+freshfrozen_mod_plot
+```
+
+
+## Fertilisation Method
+```{r}
+# IVF vs ICSI
+weights_fertmethod <- weightit(embryo_age ~ eggs_coll + fert_method + mat_age + male_age + fresh_frozen + endo_thickness + sperm_count,
+                    data = ivf,
+                    estimand = "ATE",
+                    method = "ps")
+
+ivf_fertmethod_subgroup <- ivf |> 
+   mutate(ipw_fertmethod = weights_fertmethod$weights) 
+
+model_subgroup_fertmethod <- 
+  glm(live_babies_num ~ embryo_age*fert_method,
+      family = poisson(link = "log"),
+      data = ivf_fertmethod_subgroup,
+      weights = ipw_fertmethod) |> 
+  avg_comparisons(variables = "embryo_age",
+                vcov = "HC3",
+                wts = "ipw_fertmethod",
+                transform = "exp",
+                by = "fert_method",
+                hypothesis = "pairwise") |> 
+  mutate_if(is.numeric, round, 3) |> 
+  mutate(
+    Subgroup = term,
+    "Estimate (ATE)" = estimate,
+    "95% Confidence Interval" = paste(conf.low, conf.high, sep="-"),
+    "p-value" = p.value) |> 
+    dplyr::select(Subgroup, `Estimate (ATE)`, `95% Confidence Interval`, `p-value`) |> gt()
+
+fertmethod_mod_plot <- ivf_fertmethod_subgroup |> 
+  ggplot(aes(x = fert_method, y = live_babies_num, fill = embryo_age))+
+  geom_col(position = "fill")+
+  scale_fill_manual(name = "Embryo Transfer Age", values = c("#FF6666", "#6666FF"), labels = c("Cleavage Stage", "Blastocyst"))+
+  labs(x = "Fertlisation Method", y = "Proportion of Live Births", title = "Moderation of Live Births by Fertilisation Method", color = "Embryo Transfer Age")+
+  scale_y_continuous(labels = scales::percent)+
+  theme_bw()+
+  coord_cartesian(ylim=c(0, 1.10))+
+  annotate("text", x = 1.5, y = 1.05, label = "p=0.118", fontface = "plain")
+
+fertmethod_mod_plot
+
+```
+:::
+
+### Sensitivity Analysis: Missingness with Multiple Imputation
+Within the dataset, there was significant missing data for maternal BMI (1284 observations) and sperm count (3186 observations). We performed a sensitivity analysis using multiple imputation to determine the influence that the violations of the missingness assumptions have on the obtained outcomes. 
+
+As can be seen from the table below, after multiple imputation, the effect estimate is similar to the original analysis, with there being no difference in the use of blastocyst stage or cleavage stage embryo transfer in the numbe of live births.
+```{r, include=FALSE}
+# Sensitivity Analyses
+# 1. Violations of Missingness
+#Determine missingness
+# 2. Determine Missingness
+ivf_missing <- ivf |> 
+  summarise_all(funs(sum(is.na(.)))) |> 
+  dplyr::select_if( ~.x > 0) |> 
+  dplyr::select(-c(x76:cleavage_stages)) |> 
+  pivot_longer(cols = everything()) |> 
+  gt()
+
+# Create multiply imputed dataset
+ivf_mi <- mice(ivf, m = 5, method = "cart", seed = 1234) 
+
+models <- weightthem(formula = embryo_age ~ eggs_coll + fert_method + mat_age + male_age + fresh_frozen + endo_thickness + sperm_count,
+                     datasets = ivf_mi,
+                     approach = "within",
+                     method = "ps",
+                     estimand = "ATE")
+
+results <- with(models, glm(live_babies_num ~ embryo_age,
+                            family = poisson(link = "log")))
+
+output_mi <- pool(results, dfcom = NULL) |> 
+  summary(conf.int = TRUE, exp = TRUE) |> 
+  mutate_if(is.numeric, round, 3) |> 
+  filter(!row_number() %in% 1) |> 
+  mutate(term = case_when(
+    term == "embryo_age1" ~ "Number Live Births")) |> 
+  mutate(
+    Outcome = term,
+    "Estimate (ATE)" = estimate,
+    "95% Confidence Interval" = paste(`2.5 %`, `97.5 %`, sep=" - "),
+    "p-value" = p.value) |> 
+    dplyr::select(Outcome, `Estimate (ATE)`, `95% Confidence Interval`, `p-value`) |> gt()
+
+```
+
+```{r}
+output_mi
+```
